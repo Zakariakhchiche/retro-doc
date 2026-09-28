@@ -20,7 +20,7 @@ from app.pipeline.config import pipeline_settings
 from app.pipeline.models import PipelineMeta, PipelineRunDocument, PipelineStatus
 
 # Simple in-memory cache for the analyzer version with expiration
-_version_cache: dict[str, Any] = {"version": None, "expires_at": 0}
+_version_cache: dict[str, Any] = {"version": None, "expires_at": 0, "retry_after": 0}
 _version_lock = asyncio.Lock()
 
 _NOT_FOUND = "NotFound"
@@ -96,7 +96,9 @@ async def get_analyzer_version() -> str:
     repo stamped live just after a redeploy is judged by `is_stale` against a
     version the reader has not caught up to, answering wrongly in either
     direction until the TTL lapses. This closes that on the next write. A
-    failed fetch raises before the store, so nothing unreported is cached.
+    failed fetch raises before the store, so nothing unreported is cached; it
+    records only when readers may ask again, so an outage costs the read path
+    one worker timeout per failure TTL rather than one per request.
 
     Returns:
         str: The worker's current analyzer version string.
@@ -115,6 +117,9 @@ async def get_analyzer_version() -> str:
         version: str = response.json()["version"]
     except (httpx.HTTPError, ValueError, KeyError, TypeError) as exc:
         logger.exception("Pipeline: Failed to fetch the analyzer version.")
+        _version_cache["retry_after"] = (
+            time.time() + pipeline_settings.ANALYZER_VERSION_FAILURE_CACHE_TTL_S
+        )
         raise HTTPException(
             status_code=status.HTTP_502_BAD_GATEWAY,
             detail="Failed to fetch the analyzer version.",
@@ -141,7 +146,9 @@ async def get_cached_analyzer_version() -> str | None:
 
     A failed fill answers `None` rather than raising: the version only feeds
     the `stale` flag, and an unreachable worker makes that unknown, not a
-    reason to fail the read it decorates.
+    reason to fail the read it decorates. Until the failure's TTL lapses it
+    answers `None` without asking again, re-checked under the lock so that
+    readers queued behind a hanging fetch do not each wait out a timeout.
 
     Returns:
         str | None: The worker's current analyzer version string, or `None`
@@ -153,11 +160,17 @@ async def get_cached_analyzer_version() -> str | None:
     if cached is not None and now < _version_cache["expires_at"]:
         return cached
 
+    if now < _version_cache["retry_after"]:
+        return None
+
     async with _version_lock:
         # Double-check after acquiring the lock
         cached = _version_cache["version"]
         if cached is not None and now < _version_cache["expires_at"]:
             return cached
+
+        if now < _version_cache["retry_after"]:
+            return None
 
         try:
             return await get_analyzer_version()

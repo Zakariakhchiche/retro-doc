@@ -19,6 +19,7 @@ class PipelineSettings(BaseSettings):
 
     # Analyzer version cache
     ANALYZER_VERSION_CACHE_TTL_S: int = 300
+    ANALYZER_VERSION_FAILURE_CACHE_TTL_S: int = 30
 
     # Pipeline run reconciliation
     PIPELINE_RUN_RECONCILE_GRACE_PERIOD_S: int = 300

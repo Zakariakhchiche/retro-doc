@@ -55,7 +55,11 @@ async def _insert_run(
 @pytest.fixture(autouse=True)
 def _reset_cache(monkeypatch: pytest.MonkeyPatch) -> None:
     """Empty the module-level analyzer version cache for each test."""
-    monkeypatch.setattr(service, "_version_cache", {"version": None, "expires_at": 0})
+    monkeypatch.setattr(
+        service,
+        "_version_cache",
+        {"version": None, "expires_at": 0, "retry_after": 0},
+    )
 
 
 class TestGetAnalyzerVersion:
@@ -123,6 +127,18 @@ class TestGetAnalyzerVersion:
 
         assert exc_info.value.status_code == 502
         assert service._version_cache["version"] == "abc123"
+
+    async def test_version_ignores_the_failure_ttl(
+        self,
+        mock_httpx: Callable[[AsyncMock], AsyncMock],
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """A write path asks the worker even while readers wait out a failure."""
+        monkeypatch.setitem(service._version_cache, "retry_after", time.time() + 300)
+        client = mock_httpx(mock_httpx_client({"version": "abc123"}))
+
+        assert await get_analyzer_version() == "abc123"
+        assert client.get.await_count == 1
 
     @pytest.mark.parametrize(
         "failure",
@@ -210,6 +226,36 @@ class TestGetCachedAnalyzerVersion:
 
         assert version is None
         assert service._version_cache["version"] is None
+
+    async def test_cached_version_remembers_a_failure(
+        self, mock_httpx: Callable[[AsyncMock], AsyncMock]
+    ) -> None:
+        """Reads inside the failure TTL answer unknown without asking the worker."""
+        client = mock_httpx(
+            mock_failing_httpx_client(request_error=httpx.ConnectError("refused"))
+        )
+
+        first = await get_cached_analyzer_version()
+        second = await get_cached_analyzer_version()
+
+        assert first is second is None
+        assert client.get.await_count == 1
+
+    async def test_cached_version_retries_once_the_failure_ttl_lapses(
+        self,
+        mock_httpx: Callable[[AsyncMock], AsyncMock],
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Once the failure TTL lapses the worker is consulted again."""
+        client = mock_httpx(
+            mock_failing_httpx_client(request_error=httpx.ConnectError("refused"))
+        )
+
+        await get_cached_analyzer_version()
+        monkeypatch.setitem(service._version_cache, "retry_after", 0)
+        await get_cached_analyzer_version()
+
+        assert client.get.await_count == 2
 
 
 class TestProbeInstance:
