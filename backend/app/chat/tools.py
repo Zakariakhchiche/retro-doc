@@ -22,6 +22,25 @@ from app.graphs.models import ASTDocument, CFGDocument, DFGDocument
 from app.repos.models import FileDocument, RepoDocument
 
 
+def _filter_graphs_by_scope(
+    docs: list[CFGDocument] | list[DFGDocument], scope: str | None
+) -> list[CFGDocument] | list[DFGDocument]:
+    """Keep the graphs of one scope, or all of them when none is named.
+
+    Args:
+        docs(list[CFGDocument] | list[DFGDocument]): The file's graphs, one
+            per scope.
+        scope(str | None): The scope to keep, or `None` for all of them.
+
+    Returns:
+        list[CFGDocument] | list[DFGDocument]: The matching graphs, empty when
+            the scope names nothing in this file.
+    """
+    if scope is None:
+        return docs
+    return [d for d in docs if d.scope == scope]
+
+
 def _glob_to_regex(pattern: str) -> str:
     """Convert a glob pattern to a MongoDB-compatible regex string.
 
@@ -57,20 +76,42 @@ def _glob_to_regex(pattern: str) -> str:
 
 
 def _truncate_content(content: str, max_length: int) -> str:
-    """Truncate content to *max_length* with a marker.
+    """Truncate content to `max_length` with a marker.
 
     Args:
         content(str): The content to potentially truncate.
         max_length(int): The maximum allowed length.
 
     Returns:
-        str: The original content if its length is within the threshold, or a
+        str: The original content if its length is within `max_length`, or a
             truncated version with a marker indicating truncation and total
-            length if it exceeds the threshold.
+            length if it exceeds `max_length`.
     """
     if len(content) <= max_length:
         return content
     return content[:max_length] + f"\n\n[...truncated, {len(content)} chars total]"
+
+
+def _unknown_graph_scope_message(
+    graph_type: str,
+    path: str,
+    scope: str | None,
+    docs: list[CFGDocument] | list[DFGDocument],
+) -> str:
+    """Report a scope the graph does not have, listing the ones it does.
+
+    Args:
+        graph_type(str): The graph type, for the message.
+        path(str): The file that was read.
+        scope(str | None): The scope that was asked for.
+        docs(list[CFGDocument] | list[DFGDocument]): The file's graphs.
+
+    Returns:
+        str: A message naming the available scopes, so the next call can
+            use one of them instead of falling back to reading them all.
+    """
+    available = ", ".join(str(d.scope) for d in docs)
+    return f"No {graph_type} graph for scope '{scope}' in {path}. Available scopes: {available}"
 
 
 @tool
@@ -187,7 +228,7 @@ async def repo_search_docs(
 
     # Build file refs artifact
     file_refs: list[dict[str, str]] = [
-        {"path": path, "file_id": str(file_id)}
+        {"kind": "file", "path": path, "file_id": str(file_id)}
         for path in file_paths
         if (file_id := path_to_id.get(path)) is not None
     ]
@@ -195,13 +236,13 @@ async def repo_search_docs(
     return "\n\n---\n\n".join(sections), file_refs
 
 
-@tool(response_format="content_and_artifact")
+@tool
 async def repo_glob(
     runtime: ToolRuntime,
     directory: str = "",
     pattern: str | None = None,
     offset: int = 0,
-) -> tuple[str, list[dict[str, str]]]:
+) -> str:
     """List files and directories in the repository under analysis.
 
     Browse directories or search with glob patterns in the analyzed
@@ -296,12 +337,12 @@ async def repo_glob(
     if total_entries == 0:
         label = prefix.rstrip("/") if prefix else "repository root"
         if pattern:
-            return f"No entries matching '{pattern}' in {label}.", []
-        return f"No files found in {label}.", []
+            return f"No entries matching '{pattern}' in {label}."
+        return f"No files found in {label}."
 
     page = entries[offset : offset + page_size]
     if not page:
-        return f"No entries at offset {offset} (total: {total_entries}).", []
+        return f"No entries at offset {offset} (total: {total_entries})."
 
     show_start = offset + 1
     show_end = offset + len(page)
@@ -320,18 +361,7 @@ async def repo_glob(
     for entry in page:
         lines.append(f"  {entry}")
 
-    # Build file refs artifact (directories excluded — they have no FileDocument)
-    path_to_id: dict[str, PydanticObjectId] = {doc.path: doc.id for doc in docs}
-    file_refs: list[dict[str, str]] = []
-    for entry in page:
-        if entry.endswith("/"):
-            continue
-        full_path = entry if is_recursive else prefix + entry
-        file_id = path_to_id.get(full_path)
-        if file_id is not None:
-            file_refs.append({"path": full_path, "file_id": str(file_id)})
-
-    return "\n".join(lines), file_refs
+    return "\n".join(lines)
 
 
 @tool(response_format="content_and_artifact")
@@ -376,7 +406,9 @@ async def repo_read_file(
             content, chat_settings.REPO_READ_FILE_MAX_CONTENT_LENGTH
         )
 
-    file_refs: list[dict[str, str]] = [{"path": path, "file_id": str(file_doc.id)}]
+    file_refs: list[dict[str, str]] = [
+        {"kind": "file", "path": path, "file_id": str(file_doc.id)}
+    ]
     return f"### {path}\n```\n{content}\n```", file_refs
 
 
@@ -411,7 +443,9 @@ async def repo_read_file_documentation(
     if documentation is None:
         return f"No documentation found for {path}.", []
 
-    file_refs: list[dict[str, str]] = [{"path": path, "file_id": str(file_doc.id)}]
+    file_refs: list[dict[str, str]] = [
+        {"kind": "file", "path": path, "file_id": str(file_doc.id)}
+    ]
     return f"### {path}\n{documentation.content}", file_refs
 
 
@@ -420,9 +454,13 @@ async def repo_read_file_graph(
     runtime: ToolRuntime,
     path: str,
     graph_type: Literal["ast", "cfg", "dfg"],
+    scope: str | None = None,
+    node: str | None = None,
     full_content: bool = False,
 ) -> tuple[str, list[dict[str, str]]]:
     """Read a code analysis graph for a file in the repository under analysis.
+
+    Use it for questions about structure, control flow or data flow.
 
     Returns the graph data as JSON from the analyzed repository.
     Choose the graph type:
@@ -431,9 +469,19 @@ async def repo_read_file_graph(
     - dfg: Data Flow Graphs (one per scope/function)
     full_content=True disables truncation of large graphs.
 
+    `scope` narrows a CFG or DFG to a single function, which is far cheaper
+    than reading every graph of the file. Call without it first to see the
+    scope names, then again with the one you want; it is ignored for an AST.
+    `node` addresses a single node inside that graph: its numeric `id` for a
+    CFG or DFG, or its label for an AST, whose nodes carry no ids of their own.
+    Pass it when your answer refers to one particular node, so the interface
+    can offer to open the graph already focused on it.
+
     Examples:
         - "AST of src/main.py" → path="src/main.py", graph_type="ast"
         - "Control flow of utils.py" → path="utils.py", graph_type="cfg"
+        - "The loop in Foo.run" → path="Foo.java", graph_type="cfg",
+          scope="method:com.acme.Foo#run():void", node="7"
     """
     repo_id = runtime.config["configurable"]["repo_id"]
     repo_oid = PydanticObjectId(repo_id)
@@ -460,8 +508,11 @@ async def repo_read_file_graph(
         ).to_list()
         if not cfg_docs:
             return f"No CFG graphs found for {path}.", []
+        scoped_cfg = _filter_graphs_by_scope(cfg_docs, scope)
+        if not scoped_cfg:
+            return _unknown_graph_scope_message("CFG", path, scope, cfg_docs), []
         data = json.dumps(
-            [{"scope": d.scope, "content": d.content} for d in cfg_docs],
+            [{"scope": d.scope, "content": d.content} for d in scoped_cfg],
             indent=2,
         )
     else:
@@ -471,8 +522,11 @@ async def repo_read_file_graph(
         ).to_list()
         if not dfg_docs:
             return f"No DFG graphs found for {path}.", []
+        scoped_dfg = _filter_graphs_by_scope(dfg_docs, scope)
+        if not scoped_dfg:
+            return _unknown_graph_scope_message("DFG", path, scope, dfg_docs), []
         data = json.dumps(
-            [{"scope": d.scope, "content": d.content} for d in dfg_docs],
+            [{"scope": d.scope, "content": d.content} for d in scoped_dfg],
             indent=2,
         )
 
@@ -481,8 +535,20 @@ async def repo_read_file_graph(
             data, chat_settings.REPO_READ_FILE_GRAPH_MAX_CONTENT_LENGTH
         )
 
-    file_refs: list[dict[str, str]] = [{"path": path, "file_id": str(file_doc.id)}]
-    return f"### {path} ({graph_type.upper()})\n```json\n{data}\n```", file_refs
+    # Keys with no value are omitted rather than set to None, so the artifact
+    # stays a flat dict of strings all the way to the stored message.
+    graph_ref: dict[str, str] = {
+        "kind": "graph",
+        "path": path,
+        "file_id": str(file_doc.id),
+        "graph_type": graph_type,
+    }
+    if graph_type != "ast" and scope:
+        graph_ref["scope"] = scope
+    if node:
+        graph_ref["node"] = node
+
+    return f"### {path} ({graph_type.upper()})\n```json\n{data}\n```", [graph_ref]
 
 
 @tool

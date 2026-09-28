@@ -345,7 +345,7 @@ class TestCreateThread:
 
 
 class TestDeduplicateSources:
-    """Collapse the sources cited by a turn to one entry per path."""
+    """Collapse the sources cited by a turn to one entry per place."""
 
     @pytest.mark.parametrize(
         ("sources", "expected"),
@@ -373,13 +373,92 @@ class TestDeduplicateSources:
                 ],
                 id="with-duplicates",
             ),
+            pytest.param(
+                # A file citation and a graph point are different places, even
+                # though they name the same file.
+                [
+                    {"path": "src/main.py", "file_id": "aaa"},
+                    {
+                        "kind": "graph",
+                        "path": "src/main.py",
+                        "file_id": "aaa",
+                        "graph_type": "cfg",
+                        "scope": "main",
+                    },
+                ],
+                [
+                    {"path": "src/main.py", "file_id": "aaa"},
+                    {
+                        "kind": "graph",
+                        "path": "src/main.py",
+                        "file_id": "aaa",
+                        "graph_type": "cfg",
+                        "scope": "main",
+                    },
+                ],
+                id="file-and-graph-of-same-path",
+            ),
+            pytest.param(
+                # Two graphs of the same file differing only by scope.
+                [
+                    {
+                        "kind": "graph",
+                        "path": "a.py",
+                        "file_id": "a",
+                        "graph_type": "cfg",
+                        "scope": "one",
+                    },
+                    {
+                        "kind": "graph",
+                        "path": "a.py",
+                        "file_id": "a",
+                        "graph_type": "cfg",
+                        "scope": "two",
+                    },
+                    {
+                        "kind": "graph",
+                        "path": "a.py",
+                        "file_id": "a",
+                        "graph_type": "cfg",
+                        "scope": "one",
+                    },
+                ],
+                [
+                    {
+                        "kind": "graph",
+                        "path": "a.py",
+                        "file_id": "a",
+                        "graph_type": "cfg",
+                        "scope": "one",
+                    },
+                    {
+                        "kind": "graph",
+                        "path": "a.py",
+                        "file_id": "a",
+                        "graph_type": "cfg",
+                        "scope": "two",
+                    },
+                ],
+                id="graphs-differing-by-scope",
+            ),
+            pytest.param([{"file_id": "aaa"}], [{"file_id": "aaa"}], id="missing-path"),
         ],
     )
     def test_deduplicate_sources(
         self, sources: list[dict[str, str]], expected: list[dict[str, str]]
     ) -> None:
-        """Removes duplicate sources by path, keeping first occurrence."""
+        """Removes duplicate sources, keeping first occurrence."""
         assert _deduplicate_sources(sources) == expected
+
+    def test_deduplicate_sources_caps_the_list(self) -> None:
+        """A turn that reads widely cites at most `MESSAGES_MAX_SOURCES` places."""
+        limit = chat_settings.MESSAGES_MAX_SOURCES
+        sources = [{"path": f"file{i}.py", "file_id": str(i)} for i in range(limit + 5)]
+
+        result = _deduplicate_sources(sources)
+
+        assert len(result) == limit
+        assert result[0]["path"] == "file0.py"
 
 
 class TestDeleteThread:

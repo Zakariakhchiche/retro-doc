@@ -167,23 +167,29 @@ def _copy_config_with_checkpoint_id(
 
 def _deduplicate_sources(
     sources: list[dict[str, str]],
+    limit: int = chat_settings.MESSAGES_MAX_SOURCES,
 ) -> list[dict[str, str]]:
-    """Remove duplicate sources by file path, keeping first occurrence.
+    """Remove duplicate sources, keeping first occurrence.
 
     Args:
-        sources(list[dict[str, str]]): A list of source dictionaries, each
-            containing at least a "path" key.
+        sources(list[dict[str, str]]): A list of source dictionaries.
+        limit(int): How many to keep. A turn that reads widely would
+            otherwise cite more files than the answer has paragraphs.
 
     Returns:
         list[dict[str, str]]: A new list of sources with duplicates removed,
             preserving the original order.
     """
-    seen: set[str] = set()
+    seen: set[tuple[str, ...]] = set()
     unique: list[dict[str, str]] = []
     for src in sources:
-        if src["path"] not in seen:
-            seen.add(src["path"])
-            unique.append(src)
+        key = _reference_key(src)
+        if key in seen:
+            continue
+        seen.add(key)
+        unique.append(src)
+        if len(unique) >= limit:
+            break
     return unique
 
 
@@ -401,6 +407,31 @@ async def _publish_turn(
         variant_count=position.count,
         prev_variant_id=str(position.prev_id) if position.prev_id else None,
     )
+
+
+def _reference_key(source: dict[str, str]) -> tuple[str, ...]:
+    """Build the identity of a source, for dropping the ones that repeat.
+
+    Keyed on everything that changes what opening the source shows, so two
+    points of the same file's graphs stay distinct while the same file cited
+    by three tools collapses into one. A source with no `kind` is a file: it
+    was stored before graph references existed.
+
+    Args:
+        source(dict[str, str]): A source as returned by a tool.
+
+    Returns:
+        tuple[str, ...]: The source's identity.
+    """
+    if source.get("kind") == "graph":
+        return (
+            "graph",
+            source.get("path", ""),
+            source.get("graph_type", ""),
+            source.get("scope", ""),
+            source.get("node", ""),
+        )
+    return ("file", source.get("path", ""))
 
 
 async def _resolve_entry_point(

@@ -73,7 +73,11 @@ async def get_repos_endpoint(
                 repo_hash=repo.repo_hash,
                 languages=repo.languages,
                 analyzer_version=repo.ran_analyzer_version,
-                stale=is_stale(repo, current_version),
+                stale=(
+                    is_stale(repo, current_version)
+                    if current_version is not None
+                    else None
+                ),
                 color=user_repo.color,
                 created_at=repo.created_at,
                 updated_at=repo.updated_at,
@@ -277,7 +281,9 @@ async def get_repo_endpoint(
         repo_hash=repo.repo_hash,
         languages=repo.languages,
         analyzer_version=repo.ran_analyzer_version,
-        stale=is_stale(repo, current_version),
+        stale=(
+            is_stale(repo, current_version) if current_version is not None else None
+        ),
         color=user_repo.color,
         created_at=repo.created_at,
         updated_at=repo.updated_at,
@@ -332,7 +338,9 @@ async def update_user_repo_endpoint(
         repo_hash=repo.repo_hash,
         languages=repo.languages,
         analyzer_version=repo.ran_analyzer_version,
-        stale=is_stale(repo, current_version),
+        stale=(
+            is_stale(repo, current_version) if current_version is not None else None
+        ),
         color=updated.color,
         created_at=repo.created_at,
         updated_at=repo.updated_at,

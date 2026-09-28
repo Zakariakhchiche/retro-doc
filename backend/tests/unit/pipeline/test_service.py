@@ -198,18 +198,17 @@ class TestGetCachedAnalyzerVersion:
         live.assert_awaited_once()
         assert client.get.await_count == 0
 
-    async def test_cached_version_worker_error_raises_502(
+    async def test_cached_version_worker_error_returns_none(
         self, mock_httpx: Callable[[AsyncMock], AsyncMock]
     ) -> None:
-        """A worker failure surfaces as 502 and leaves nothing cached."""
+        """A worker failure reads as unknown and leaves nothing cached."""
         mock_httpx(
             mock_failing_httpx_client(request_error=httpx.ConnectError("refused"))
         )
 
-        with pytest.raises(HTTPException) as exc_info:
-            await get_cached_analyzer_version()
+        version = await get_cached_analyzer_version()
 
-        assert exc_info.value.status_code == 502
+        assert version is None
         assert service._version_cache["version"] is None
 
 

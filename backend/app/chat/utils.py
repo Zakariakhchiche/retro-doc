@@ -28,7 +28,7 @@ def to_message_response(
         id=message.id,  # type: ignore[arg-type]
         role=message.role,
         content=message.content,
-        sources=message.sources,
+        sources=message.sources,  # type: ignore[arg-type]
         variant_index=variant.index if variant else None,
         variant_count=variant.count if variant else None,
         prev_variant_id=variant.prev_id if variant else None,

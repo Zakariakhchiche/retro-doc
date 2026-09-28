@@ -140,16 +140,18 @@ def sse_tool_end(
 ) -> ServerSentEvent:
     """Format a tool invocation end as an SSE event.
 
-    When the tool references files (e.g. `glob`, `search_repo_docs`),
-    `sources` carries structured `{path, file_id}` pairs so the
-    frontend can make file mentions clickable.
+    When the tool read something the answer can point back at, `sources`
+    carries it as a reference tagged by `kind`, so the frontend can offer to
+    open it: `file` for a `{path, file_id}` pair, `graph` for a point in a
+    code analysis graph, which also carries `graph_type` and optionally
+    `scope` and `node`.
 
     Args:
         tool(str): The name of the tool that finished.
         id(str): The unique execution ID for this tool call.
         status(Literal["success", "error"]): The execution status of the tool.
-        sources(list[dict[str, str]] | None): Optional file references
-            produced by the tool, each containing `path` and `file_id`.
+        sources(list[dict[str, str]] | None): Optional references produced by
+            the tool. See `app.chat.schemas.ChatReference` for their shape.
 
     Returns:
         ServerSentEvent: An SSE object with event type `tool_end`.

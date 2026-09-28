@@ -226,6 +226,32 @@ class TestCreateRepoEndpoint:
         assert data["status"] == status.value
 
 
+class TestGetReposEndpoint:
+    """`GET /repos` — list the caller's repositories with their staleness."""
+
+    async def test_get_repos_reports_unknown_staleness_when_worker_unreachable(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        mock_client: httpx.AsyncClient,
+        mock_current_version: AsyncMock,
+        repo_doc: RepoDocument,
+        user_repo_doc: UserRepoDocument,
+        repo_id: PydanticObjectId,
+    ) -> None:
+        """An unknown worker version still lists repos, with `stale` null."""
+        mock_current_version.return_value = None
+        monkeypatch.setattr(
+            router, "get_repos", AsyncMock(return_value=[(repo_doc, user_repo_doc)])
+        )
+
+        resp = await mock_client.get("/repos")
+
+        assert resp.status_code == 200
+        [repo] = resp.json()["repos"]
+        assert repo["repo_id"] == str(repo_id)
+        assert repo["stale"] is None
+
+
 class TestGetRepoEndpoint:
     """`GET /repos/{repo_id}` — report a repository with its meta and staleness."""
 
@@ -278,6 +304,7 @@ class TestGetRepoEndpoint:
             pytest.param("v1", "v2", "v1", True, id="newer-available"),
             pytest.param(None, "v1", None, False, id="not-stamped-yet"),
             pytest.param("v2", "v2", "v2", False, id="redeployed-mid-run"),
+            pytest.param("v1", None, "v1", None, id="worker-unreachable"),
         ],
     )
     async def test_get_repo_reports_the_analyzer_version_and_staleness(
@@ -288,9 +315,9 @@ class TestGetRepoEndpoint:
         repo_doc: RepoDocument,
         repo_id: PydanticObjectId,
         ran_analyzer_version: str | None,
-        current_version: str,
+        current_version: str | None,
         expected_version: str | None,
-        expected_stale: bool,
+        expected_stale: bool | None,
     ) -> None:
         """Reports the version verbatim, with `stale` derived against the worker's."""
         repo_doc.ran_analyzer_version = ran_analyzer_version

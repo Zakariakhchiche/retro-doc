@@ -45,7 +45,7 @@ class ChatSettings(BaseSettings):
 
     # Agent
     AGENT_MODEL_CALL_LIMIT: int = 25
-    AGENT_RECURSION_LIMIT: int = 128  # Safety net. AGENT_MODEL_CALL_LIMIT and AGENT_TOOL_CALL_LIMIT are the primary budgets.
+    AGENT_RECURSION_LIMIT: int = 128  # Safety net. AGENT_MODEL_CALL_LIMIT and AGENT_TOOL_CALL_LIMIT are the primary budgets
     AGENT_TOOL_CALL_LIMIT: int = 15
 
     AGENT_SUMMARIZATION_TRIGGER: tuple[str, int] | None = ("tokens", 80_000)
@@ -60,6 +60,9 @@ class ChatSettings(BaseSettings):
     # Chat history pagination
     MESSAGES_PAGE_SIZE: int = 30
     MESSAGES_MAX_PAGE_SIZE: int = 100
+
+    # Answer references
+    MESSAGES_MAX_SOURCES: int = 12  # Maximum number of sources to include in a message
 
     # Agent tools
     REPO_GLOB_MAX_RESULTS: int = 100

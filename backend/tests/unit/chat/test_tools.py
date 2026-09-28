@@ -241,14 +241,11 @@ class TestRepoGlob:
         ]
         _patch_find_files(monkeypatch, docs)
 
-        content, artifact = await _glob(runtime=_make_runtime())
+        content = await _glob(runtime=_make_runtime())
 
         assert "Contents of /" in content
         assert "src/" in content
         assert "README.md" in content
-        # Only files (not directories) appear in the artifact
-        artifact_paths = {ref["path"] for ref in artifact}
-        assert "README.md" in artifact_paths
 
     async def test_glob_dirs_only_pattern(
         self, monkeypatch: pytest.MonkeyPatch
@@ -260,11 +257,10 @@ class TestRepoGlob:
         ]
         _patch_find_files(monkeypatch, docs, sorted_query=True)
 
-        content, artifact = await _glob(runtime=_make_runtime(), pattern="**/")
+        content = await _glob(runtime=_make_runtime(), pattern="**/")
 
         assert "src/" in content
         assert "helper.py" not in content
-        assert artifact == []
 
     async def test_glob_empty_results_no_pattern(
         self, monkeypatch: pytest.MonkeyPatch
@@ -272,10 +268,9 @@ class TestRepoGlob:
         """Returns 'No files found' when directory is empty."""
         _patch_find_files(monkeypatch, [])
 
-        content, artifact = await _glob(runtime=_make_runtime())
+        content = await _glob(runtime=_make_runtime())
 
         assert "No files found in repository root." in content
-        assert artifact == []
 
     async def test_glob_empty_results_with_pattern(
         self, monkeypatch: pytest.MonkeyPatch
@@ -283,10 +278,9 @@ class TestRepoGlob:
         """Returns 'No entries matching' when pattern matches nothing."""
         _patch_find_files(monkeypatch, [], sorted_query=True)
 
-        content, artifact = await _glob(runtime=_make_runtime(), pattern="**/*.rs")
+        content = await _glob(runtime=_make_runtime(), pattern="**/*.rs")
 
         assert "No entries matching" in content
-        assert artifact == []
 
     async def test_glob_non_recursive_pattern(
         self, monkeypatch: pytest.MonkeyPatch
@@ -299,14 +293,10 @@ class TestRepoGlob:
         ]
         _patch_find_files(monkeypatch, docs)
 
-        content, artifact = await _glob(
-            runtime=_make_runtime(), directory="src", pattern="*.py"
-        )
+        content = await _glob(runtime=_make_runtime(), directory="src", pattern="*.py")
 
         assert "app.py" in content
         assert "app.ts" not in content
-        artifact_paths = {ref["path"] for ref in artifact}
-        assert "src/app.py" in artifact_paths
 
     async def test_glob_offset_out_of_range(
         self, monkeypatch: pytest.MonkeyPatch
@@ -314,10 +304,9 @@ class TestRepoGlob:
         """Returns message when offset is beyond total entries."""
         _patch_find_files(monkeypatch, [_mock_file_doc("file.py")])
 
-        content, artifact = await _glob(runtime=_make_runtime(), offset=100)
+        content = await _glob(runtime=_make_runtime(), offset=100)
 
         assert "No entries at offset 100" in content
-        assert artifact == []
 
     async def test_glob_pagination_offset(
         self, monkeypatch: pytest.MonkeyPatch
@@ -326,7 +315,7 @@ class TestRepoGlob:
         paths = [f"file{i}.py" for i in range(chat_settings.REPO_GLOB_MAX_RESULTS + 5)]
         _patch_find_files(monkeypatch, [_mock_file_doc(p) for p in paths])
 
-        content, _artifact = await _glob(
+        content = await _glob(
             runtime=_make_runtime(), offset=chat_settings.REPO_GLOB_MAX_RESULTS
         )
 
@@ -344,18 +333,11 @@ class TestRepoGlob:
         ]
         _patch_find_files(monkeypatch, docs, sorted_query=True)
 
-        content, artifact = await _glob(runtime=_make_runtime(), pattern="**/*.py")
+        content = await _glob(runtime=_make_runtime(), pattern="**/*.py")
 
         assert "src/main.py" in content
         assert "src/utils/helper.py" in content
         assert "tests/test_main.py" in content
-        assert len(artifact) == 3
-        artifact_paths = {ref["path"] for ref in artifact}
-        assert artifact_paths == {
-            "src/main.py",
-            "src/utils/helper.py",
-            "tests/test_main.py",
-        }
 
 
 class TestRepoReadFile:
@@ -516,7 +498,12 @@ class TestRepoReadFileGraph:
         assert "### src/main.py (AST)" in content
         assert '"type": "Program"' in content
         assert len(artifact) == 1
+        assert artifact[0]["kind"] == "graph"
+        assert artifact[0]["graph_type"] == "ast"
         assert artifact[0]["file_id"] == "bbbbbbbbbbbbbbbbbbbbbbbb"
+        # An AST is a single graph per file, so it has no scope to record.
+        assert "scope" not in artifact[0]
+        assert "node" not in artifact[0]
 
     async def test_read_file_graph_cfg_returns_scoped(
         self, monkeypatch: pytest.MonkeyPatch
@@ -537,6 +524,40 @@ class TestRepoReadFileGraph:
         assert '"scope": "main"' in content
         assert '"scope": "helper"' in content
         assert len(artifact) == 1
+        assert artifact[0]["kind"] == "graph"
+        assert artifact[0]["graph_type"] == "cfg"
+
+    async def test_read_file_graph_cfg_filters_by_scope(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A named scope narrows the graphs read to that one function."""
+        cfg_docs = [
+            _mock_graph_doc({"nodes": [1, 2]}, scope="main"),
+            _mock_graph_doc({"nodes": [3]}, scope="helper"),
+        ]
+        _patch_find_one(monkeypatch, FileDocument, _mock_file_doc("src/main.py"))
+        _patch_find_graph_docs(monkeypatch, CFGDocument, cfg_docs)
+
+        content, artifact = await _read_graph(
+            runtime=_make_runtime(),
+            path="src/main.py",
+            graph_type="cfg",
+            scope="helper",
+            node="3",
+        )
+
+        assert '"scope": "helper"' in content
+        assert '"scope": "main"' not in content
+        assert artifact == [
+            {
+                "kind": "graph",
+                "path": "src/main.py",
+                "file_id": "aaaaaaaaaaaaaaaaaaaaaaaa",
+                "graph_type": "cfg",
+                "scope": "helper",
+                "node": "3",
+            }
+        ]
 
     async def test_read_file_graph_truncates_large_graph(
         self, monkeypatch: pytest.MonkeyPatch
@@ -553,6 +574,25 @@ class TestRepoReadFileGraph:
 
         assert "truncated" in content
         assert len(artifact) == 1
+
+    async def test_read_file_graph_unknown_scope_lists_available(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A scope the file does not have reports the ones it does."""
+        cfg_docs = [_mock_graph_doc({"nodes": [1]}, scope="main")]
+        _patch_find_one(monkeypatch, FileDocument, _mock_file_doc("src/main.py"))
+        _patch_find_graph_docs(monkeypatch, CFGDocument, cfg_docs)
+
+        content, artifact = await _read_graph(
+            runtime=_make_runtime(),
+            path="src/main.py",
+            graph_type="cfg",
+            scope="nope",
+        )
+
+        assert "No CFG graph for scope 'nope'" in content
+        assert "Available scopes: main" in content
+        assert artifact == []
 
 
 class TestRepoReadMetadata:
@@ -622,6 +662,7 @@ class TestRepoSearchDocs:
         assert "### src/main.py" in content
         assert "Main entry point." in content
         assert len(artifact) == 1
+        assert artifact[0]["kind"] == "file"
         assert artifact[0]["path"] == "src/main.py"
         assert artifact[0]["file_id"] == "bbbbbbbbbbbbbbbbbbbbbbbb"
 

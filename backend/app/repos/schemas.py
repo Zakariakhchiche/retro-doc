@@ -67,7 +67,7 @@ class RepoResponse(BaseModel):
     repo_hash: str | None
     languages: list[str]
     analyzer_version: str | None
-    stale: bool
+    stale: bool | None
     color: str | None = None
     created_at: datetime
     updated_at: datetime

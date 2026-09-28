@@ -128,7 +128,7 @@ async def get_analyzer_version() -> str:
     return version
 
 
-async def get_cached_analyzer_version() -> str:
+async def get_cached_analyzer_version() -> str | None:
     """Read the analysis worker's current analyzer version, cached with a TTL.
 
     For the read path only, where rendering freshness must not cost a worker
@@ -139,12 +139,13 @@ async def get_cached_analyzer_version() -> str:
     writer: a store here would stamp the expiry from `now`, read before the
     lock and the fetch, cutting the TTL by however long those took.
 
-    Returns:
-        str: The worker's current analyzer version string.
+    A failed fill answers `None` rather than raising: the version only feeds
+    the `stale` flag, and an unreachable worker makes that unknown, not a
+    reason to fail the read it decorates.
 
-    Raises:
-        HTTPException: 502 if the worker is unreachable or returns an
-            unexpected response.
+    Returns:
+        str | None: The worker's current analyzer version string, or `None`
+            if the worker is unreachable or returns an unexpected response.
     """
     now = time.time()
 
@@ -158,7 +159,10 @@ async def get_cached_analyzer_version() -> str:
         if cached is not None and now < _version_cache["expires_at"]:
             return cached
 
-        return await get_analyzer_version()
+        try:
+            return await get_analyzer_version()
+        except HTTPException:
+            return None
 
 
 async def reconcile_pipeline_run(repo_id: PydanticObjectId) -> None:
