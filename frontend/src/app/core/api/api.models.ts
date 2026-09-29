@@ -226,6 +226,8 @@ export interface ChatMessage {
   timestamp?: Date;
   context?: { fileName: string; nodeLabel: string };
   reasoning?: ChatMessageSegment[];
+  /** The files and graph points this answer drew on, in the order cited. */
+  sources?: ChatSource[];
   /** 1-based position among the answers to the same question. */
   variantIndex?: number;
   /** Total answers to the same question. Absent or 1 means no pager. */
@@ -250,6 +252,7 @@ export interface ChatMessageResponse {
   id: string;
   role: string;
   content: string;
+  sources?: ChatSource[];
   /** Pager fields, sent only for a question that has more than one answer. */
   variant_index?: number;
   variant_count?: number;
@@ -267,10 +270,38 @@ export interface ChatThreadMessagesResponse {
   next_cursor?: string | null;
 }
 
-/** A file a tool referenced, so the answer can link back to it. */
-export interface ChatSource {
+export type GraphKind = 'ast' | 'cfg' | 'dfg';
+
+/** A repository file an answer drew on, so the reader can open it. */
+export interface ChatFileReference {
+  /** Absent on a message stored before graph references existed. */
+  kind?: 'file';
   path: string;
   file_id: string;
+}
+
+/** A point in a code analysis graph an answer drew on. */
+export interface ChatGraphReference {
+  kind: 'graph';
+  path: string;
+  file_id: string;
+  graph_type: GraphKind;
+  /** Names one CFG/DFG of the file; they are stored one per function. */
+  scope?: string;
+  /** Node id for a CFG or DFG, label for an AST, whose nodes carry no ids. */
+  node?: string;
+}
+
+/**
+ * A place an answer drew on.
+ *
+ * `sources` is the wire name: it predates graph references and is what both
+ * the SSE payload and the stored message still call the field.
+ */
+export type ChatSource = ChatFileReference | ChatGraphReference;
+
+export function isGraphReference(source: ChatSource): source is ChatGraphReference {
+  return source.kind === 'graph';
 }
 
 /**

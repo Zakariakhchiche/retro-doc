@@ -19,24 +19,37 @@ import { ActivatedRoute } from '@angular/router';
 import { map, Subscription, switchMap } from 'rxjs';
 import { TranslateModule, TranslateService } from '@ngx-translate/core';
 import {
+  ChatGraphReference,
   ChatMessage,
   ChatMessageResponse,
   ChatMessageSegment,
   ChatRole,
   ChatService,
+  ChatSource,
   ChatStreamEvent,
   ChatThread,
   ChatThreadMessagesResponse,
   DeepAnalysis,
   DeepAnalysisDetail,
   DeepAnalysisService,
+  isGraphReference,
   RepoStore,
 } from '../../core/api';
 import { BreadcrumbService } from '../../shared/breadcrumb.service';
+import {
+  buildFileIndex,
+  FileRefActivation,
+  FileRefsDirective,
+} from '../../shared/file-ref.directive';
+import {
+  FileContentMode,
+  FileSourceViewer,
+} from '../../shared/file-source-viewer/file-source-viewer';
 import { MarkdownPipe, MarkdownStreamPipe } from '../../shared/markdown.pipe';
 import { MermaidDirective } from '../../shared/mermaid.directive';
 import { timeAgo } from '../../shared/time-ago';
 import { GraphExplorer } from './graph-explorer/graph-explorer';
+import { formatScopeLabel, GraphTarget } from './graph-explorer/graph-explorer.model';
 import { AnalysisActionService } from './analysis-action.service';
 import { DeepAnalysisDialog } from './deep-analysis-dialog/deep-analysis-dialog';
 import { DeepAnalysisDetailComponent } from './deep-analysis-detail/deep-analysis-detail';
@@ -45,7 +58,7 @@ import { UiButton, UiSpinner } from '@design-system';
 @Component({
   selector: 'app-analysis',
   changeDetection: ChangeDetectionStrategy.OnPush,
-  imports: [GraphExplorer, DeepAnalysisDialog, DeepAnalysisDetailComponent, FormsModule, DatePipe, MarkdownPipe, MarkdownStreamPipe, MermaidDirective, TranslateModule, UiButton, UiSpinner],
+  imports: [GraphExplorer, DeepAnalysisDialog, DeepAnalysisDetailComponent, FileSourceViewer, FormsModule, DatePipe, FileRefsDirective, MarkdownPipe, MarkdownStreamPipe, MermaidDirective, TranslateModule, UiButton, UiSpinner],
   templateUrl: './analysis.html',
   styleUrl: './analysis.scss',
 })
@@ -63,6 +76,12 @@ export class Analysis implements OnInit {
 
   /** Number of messages fetched per history page. */
   private static readonly PAGE_SIZE = 30;
+
+  /** Matches `MAX_MESSAGE_SOURCES` on the server, so both strips agree. */
+  private static readonly MAX_SOURCES = 12;
+
+  /** Citations shown before the strip has to be expanded. */
+  private static readonly COLLAPSED_SOURCES = 5;
 
   protected readonly repoId = toSignal(
     this.route.paramMap.pipe(map((params) => params.get('id')!))
@@ -82,6 +101,14 @@ export class Analysis implements OnInit {
   );
 
   protected readonly fileCount = computed(() => this.files().length);
+
+  /**
+   * Repo paths and unambiguous basenames, for resolving mentions in answers.
+   *
+   * Derived from the file list the page already loaded, so making a path in
+   * an answer clickable costs no extra request.
+   */
+  protected readonly fileIndex = computed(() => buildFileIndex(this.files()));
   protected readonly repoName = computed(() => this.repo()?.name ?? '');
 
   // A zip upload is the repository with no commit pinned to it — the same test
@@ -113,6 +140,12 @@ export class Analysis implements OnInit {
   private previousFocus: HTMLElement | null = null;
   private graphOpenedFromChat = false;
 
+  /** The file the drawer is showing, `null` when it is closed. */
+  protected readonly activeFile = signal<{ fileId: string; mode: FileContentMode } | null>(null);
+
+  /** Graph point the explorer should open on, set by a citation. */
+  protected readonly graphTarget = signal<GraphTarget | null>(null);
+
   // Chat state
   protected readonly isChatOpen = signal(false);
   protected readonly chatMessages = signal<ChatMessage[]>([]);
@@ -136,6 +169,10 @@ export class Analysis implements OnInit {
   protected readonly hasActiveTool = computed(() => this.activeTools().size > 0);
   protected readonly streamSegments = signal<ChatMessageSegment[]>([]);
   protected readonly expandedReasoning = signal<Set<string>>(new Set());
+  /** References collected from `tool_end` for the answer being written. */
+  private readonly streamSources = signal<ChatSource[]>([]);
+  /** Answers whose citation strip the reader has expanded, keyed by message. */
+  protected readonly expandedSources = signal<Set<string>>(new Set());
 
   // Lazy history loading
   protected readonly loadingOlderMessages = signal(false);
@@ -267,6 +304,7 @@ export class Analysis implements OnInit {
   protected closeGraph(): void {
     this.isGraphOpen.set(false);
     this.graphOpenedFromChat = false;
+    this.graphTarget.set(null);
     setTimeout(() => this.previousFocus?.focus());
   }
 
@@ -280,6 +318,53 @@ export class Analysis implements OnInit {
 
   protected openGraphFromToolsMenu(): void {
     this.isToolsMenuOpen.set(false);
+    this.graphOpenedFromChat = true;
+    // Opened by hand, so the explorer starts where the user left it rather
+    // than on the point some earlier citation pointed at.
+    this.graphTarget.set(null);
+    this.openGraph();
+  }
+
+  /**
+   * Open whatever a citation points at.
+   *
+   * The union is narrowed here rather than in the template: `strictTemplates`
+   * does not narrow a `@for` loop variable through an inline `@if`, so reading
+   * `graph_type` there would not compile.
+   */
+  protected openSource(source: ChatSource): void {
+    if (isGraphReference(source)) {
+      this.openGraphReference(source);
+    } else {
+      this.openFile(source.file_id);
+    }
+  }
+
+  /** Open the drawer on a path the answer mentioned in its body. */
+  protected openFileFromPath(ref: FileRefActivation): void {
+    this.openFile(ref.fileId);
+  }
+
+  protected closeFileViewer(): void {
+    this.activeFile.set(null);
+  }
+
+  private openFile(fileId: string): void {
+    // A source stored before file ids were recorded has nothing to open.
+    if (!fileId) return;
+    this.activeFile.set({ fileId, mode: 'source' });
+  }
+
+  private openGraphReference(source: ChatGraphReference): void {
+    if (!source.file_id) return;
+    this.graphTarget.set({
+      fileId: source.file_id,
+      graphType: source.graph_type,
+      scope: source.scope ?? null,
+      node: source.node ?? null,
+    });
+    // The explorer's "ask about this node" should continue this conversation,
+    // not start a new one — the reader came from it.
     this.graphOpenedFromChat = true;
     this.openGraph();
   }
@@ -305,6 +390,8 @@ export class Analysis implements OnInit {
     this.activeTools.set(new Map());
     this.streamSegments.set([]);
     this.expandedReasoning.set(new Set());
+    this.streamSources.set([]);
+    this.expandedSources.set(new Set());
     this.loadingOlderMessages.set(false);
     this.messagesCursor.set(null);
     this.awaitingInitialScroll = false;
@@ -353,6 +440,8 @@ export class Analysis implements OnInit {
     this.activeTools.set(new Map());
     this.streamSegments.set([]);
     this.expandedReasoning.set(new Set());
+    this.streamSources.set([]);
+    this.expandedSources.set(new Set());
     this.loadingOlderMessages.set(false);
     this.messagesCursor.set(null);
     this.awaitingInitialScroll = true;
@@ -395,6 +484,8 @@ export class Analysis implements OnInit {
     // `hasMoreMessages` derives from the cursor, so setting it is enough.
     this.messagesCursor.set(res.next_cursor ?? null);
     this.streamSegments.set([]);
+    this.streamSources.set([]);
+    this.expandedSources.set(new Set());
     this.retryFailed.set(false);
     this.loadingOlderMessages.set(false);
     this.awaitingInitialScroll = true;
@@ -469,6 +560,7 @@ export class Analysis implements OnInit {
       id: message.id,
       role,
       ...this.parseMessageContext(message.content, role),
+      sources: message.sources,
       variantIndex: message.variant_index,
       variantCount: message.variant_count,
       prevVariantId: message.prev_variant_id,
@@ -566,6 +658,7 @@ export class Analysis implements OnInit {
     this.chatInputValue.set('');
     this.isStreaming.set(true);
     this.streamSegments.set([]);
+    this.streamSources.set([]);
 
     // Target the streamed message by key: loading older pages prepends to the
     // list, so a captured array index would drift onto the wrong message.
@@ -644,11 +737,12 @@ export class Analysis implements OnInit {
     // Cleared before the live panel is switched on, or the previous turn's
     // segments would flash in place of the answer being regenerated.
     this.streamSegments.set([]);
+    this.streamSources.set([]);
     this.activeTools.set(new Map());
     this.retryFailed.set(false);
     this.isRetrying.set(true);
     this.isStreaming.set(true);
-    this.patchMessage(assistantKey, { content: '', reasoning: undefined });
+    this.patchMessage(assistantKey, { content: '', reasoning: undefined, sources: undefined });
     this.scheduleScrollToBottom();
 
     this.streamSub?.unsubscribe();
@@ -756,6 +850,16 @@ export class Analysis implements OnInit {
         );
         return [...updated, { type: 'text' as const, content: '' }];
       });
+      // Attached as the tools report them, rather than once the stream ends:
+      // the strip fills in as the answer is researched, and it survives a turn
+      // whose last event is not a tool — which `finalizeStreamedMessage`
+      // returns early from.
+      const cited = event.sources;
+      if (cited?.length) {
+        const merged = this.mergeSources(this.streamSources(), cited);
+        this.streamSources.set(merged);
+        this.patchMessage(assistantKey, { sources: merged });
+      }
     } else if (event.type === 'message_saved') {
       this.patchMessage(assistantKey, {
         id: event.messageId,
@@ -815,6 +919,7 @@ export class Analysis implements OnInit {
       msgs.map((msg) => (msg.key === previous.key ? previous : msg))
     );
     this.streamSegments.set([]);
+    this.streamSources.set([]);
     this.retryFailed.set(true);
   }
 
@@ -895,6 +1000,88 @@ export class Analysis implements OnInit {
 
   protected isReasoningExpanded(key: string): boolean {
     return this.expandedReasoning().has(key);
+  }
+
+  protected toggleSources(key: string): void {
+    this.expandedSources.update((set) => {
+      const next = new Set(set);
+      if (next.has(key)) {
+        next.delete(key);
+      } else {
+        next.add(key);
+      }
+      return next;
+    });
+  }
+
+  protected isSourcesExpanded(key: string): boolean {
+    return this.expandedSources().has(key);
+  }
+
+  /** The citations to draw, trimmed until the reader asks for the rest. */
+  protected visibleSources(msg: ChatMessage): ChatSource[] {
+    const sources = msg.sources ?? [];
+    return this.isSourcesExpanded(msg.key)
+      ? sources
+      : sources.slice(0, Analysis.COLLAPSED_SOURCES);
+  }
+
+  protected hiddenSourceCount(msg: ChatMessage): number {
+    return Math.max(0, (msg.sources?.length ?? 0) - Analysis.COLLAPSED_SOURCES);
+  }
+
+  protected isGraphSource(source: ChatSource): boolean {
+    return isGraphReference(source);
+  }
+
+  /** `@for` identity, and the key duplicates are recognised by. */
+  protected sourceKey(source: ChatSource): string {
+    return isGraphReference(source)
+      ? ['graph', source.path, source.graph_type, source.scope ?? '', source.node ?? ''].join('\n')
+      : ['file', source.path].join('\n');
+  }
+
+  /** A chip's text: the file's name, plus the function a graph point is in. */
+  protected sourceLabel(source: ChatSource): string {
+    const name = source.path.slice(source.path.lastIndexOf('/') + 1);
+    if (!isGraphReference(source) || !source.scope) return name;
+    return `${name} › ${formatScopeLabel(source.scope)}`;
+  }
+
+  /** The graph a chip opens, or `''` for a plain file citation. */
+  protected sourceBadge(source: ChatSource): string {
+    return isGraphReference(source) ? source.graph_type.toUpperCase() : '';
+  }
+
+  protected sourceAriaLabel(source: ChatSource): string {
+    return isGraphReference(source)
+      ? this.translateService.instant('analysis.openGraphPoint', {
+          type: source.graph_type.toUpperCase(),
+          path: source.path,
+        })
+      : this.translateService.instant('analysis.openFile', { path: source.path });
+  }
+
+  /**
+   * Add newly cited references to the ones the answer already carries.
+   *
+   * Deduplicated by the same composite key the server uses and capped at the
+   * same number, so the strip drawn live matches the one a reloaded thread
+   * shows.
+   */
+  private mergeSources(existing: ChatSource[], incoming: ChatSource[]): ChatSource[] {
+    const seen = new Set(existing.map((source) => this.sourceKey(source)));
+    const merged = [...existing];
+
+    for (const source of incoming) {
+      if (merged.length >= Analysis.MAX_SOURCES) break;
+      const key = this.sourceKey(source);
+      if (seen.has(key)) continue;
+      seen.add(key);
+      merged.push(source);
+    }
+
+    return merged;
   }
 
   // Deep analysis methods

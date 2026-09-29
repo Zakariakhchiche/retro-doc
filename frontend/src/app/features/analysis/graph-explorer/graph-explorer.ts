@@ -23,8 +23,11 @@ import {
   convertAstToElements,
   convertScopedGraphToElements,
   formatScopeLabel,
+  GraphElements,
+  GraphTarget,
   GraphType,
   isLegacyGraphData,
+  resolveTargetNodeId,
 } from './graph-explorer.model';
 import { FileTree } from './file-tree/file-tree';
 import { buildFileTree } from './file-tree/file-tree.model';
@@ -47,6 +50,8 @@ export class GraphExplorer implements AfterViewInit, OnDestroy {
   readonly chatRequested = output<{ nodeLabel: string; fileName: string }>();
   readonly repoId = input.required<string>();
   readonly files = input.required<RepoFile[]>();
+  /** Graph point to open on, when the explorer was opened from an answer. */
+  readonly target = input<GraphTarget | null>(null);
 
   private readonly repoService = inject(RepoService);
   private readonly destroyRef = inject(DestroyRef);
@@ -56,6 +61,9 @@ export class GraphExplorer implements AfterViewInit, OnDestroy {
   private readonly cyContainer = viewChild.required<ElementRef<HTMLDivElement>>('cyContainer');
 
   private cy: cytoscape.Core | null = null;
+
+  /** Node the next render should focus, consumed once it has been laid out. */
+  private pendingNodeId: string | null = null;
 
   protected readonly selectedFileId = signal<string | null>(null);
   protected readonly selectedGraphType = signal<GraphType>('ast');
@@ -109,6 +117,7 @@ export class GraphExplorer implements AfterViewInit, OnDestroy {
   ngAfterViewInit(): void {
     this.dialogRef().nativeElement.showModal();
     this.initCytoscape();
+    this.applyTarget();
   }
 
   ngOnDestroy(): void {
@@ -132,7 +141,23 @@ export class GraphExplorer implements AfterViewInit, OnDestroy {
     }
   }
 
-  protected onFileSelect(fileId: string): void {
+  /**
+   * Open the graph point an answer pointed at.
+   *
+   * The explorer is created afresh on every open, so the target is read once
+   * here rather than tracked: it says where to *start*, and must not pull the
+   * view back whenever the reader navigates somewhere else.
+   */
+  private applyTarget(): void {
+    const target = this.target();
+    if (!target) return;
+
+    this.selectedGraphType.set(target.graphType);
+    this.pendingNodeId = target.node;
+    this.onFileSelect(target.fileId, target.scope);
+  }
+
+  protected onFileSelect(fileId: string, scope: string | null = null): void {
     if (!fileId) return;
     this.selectedFileId.set(fileId);
     this.activePanel.set(null);
@@ -150,7 +175,7 @@ export class GraphExplorer implements AfterViewInit, OnDestroy {
       .subscribe({
         next: (data) => {
           this.graphData.set(data);
-          this.selectedScope.set(null);
+          this.selectedScope.set(scope);
           this.renderGraph();
         },
         error: () => {
@@ -238,7 +263,7 @@ export class GraphExplorer implements AfterViewInit, OnDestroy {
     }
 
     const type = this.selectedGraphType();
-    let elements: { nodes: cytoscape.ElementDefinition[]; edges: cytoscape.ElementDefinition[] };
+    let elements: GraphElements;
 
     if (type === 'ast') {
       elements = data.ast ? convertAstToElements(data.ast) : { nodes: [], edges: [] };
@@ -251,15 +276,55 @@ export class GraphExplorer implements AfterViewInit, OnDestroy {
       const graph = graphs[scopeIndex >= 0 ? scopeIndex : 0];
       elements = graph ? convertScopedGraphToElements(graph.content) : { nodes: [], edges: [] };
 
-      if (!scopeLabel && graphs.length > 0) {
-        this.selectedScope.set(graphs[0]?.scope ?? '(global)');
+      // Keep the picker on the graph actually shown: with nothing chosen that
+      // is the file's first, and a scope carried in from an answer may name a
+      // function this file has no graph for.
+      if (graph) {
+        this.selectedScope.set(graph.scope ?? '(global)');
       }
     }
 
     this.cy.elements().remove();
     this.cy.add([...elements.nodes, ...elements.edges]);
-    this.cy.layout(this.getLayoutOptions(type)).run();
     this.visibleNodeCount.set(this.cy.nodes().length);
+
+    const layout = this.cy.layout(this.getLayoutOptions(type));
+    // Dagre animates into place and fits the viewport over 300ms, so positions
+    // are not final when `run()` returns and a centring done now would be
+    // undone by that fit.
+    const pending = this.pendingNodeId;
+    this.pendingNodeId = null;
+    if (pending) {
+      layout.one('layoutstop', () => this.focusNode(elements, pending));
+    }
+    layout.run();
+  }
+
+  /**
+   * Select and centre the node an answer pointed at.
+   *
+   * Selecting it also lights up the `node:selected` style and the "ask about
+   * this node" action, so the reader lands on exactly what they would have had
+   * by finding and clicking the node themselves.
+   */
+  private focusNode(elements: GraphElements, node: string): void {
+    if (!this.cy) return;
+
+    const nodeId = resolveTargetNodeId(elements, node);
+    if (!nodeId) return;
+
+    const found = this.cy.getElementById(nodeId);
+    if (found.empty()) return;
+
+    this.cy.nodes().unselect();
+    found.select();
+    this.selectedNodeLabel.set(found.data('label') ?? null);
+    // Zoom in only if the fit left the graph smaller than life size; a dense
+    // graph that had to be shrunk still deserves a readable node.
+    this.cy.animate(
+      { center: { eles: found }, zoom: Math.max(this.cy.zoom(), 1) },
+      { duration: 300 }
+    );
   }
 
   private getCytoscapeStyles(): cytoscape.StylesheetStyle[] {

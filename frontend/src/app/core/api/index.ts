@@ -2,10 +2,13 @@ export type {
   AnalyzeFileResponse,
   AnalyzeGitRequest,
   AnalyzeGitResult,
+  ChatFileReference,
+  ChatGraphReference,
   ChatMessage,
   ChatMessageResponse,
   ChatMessageSegment,
   ChatRole,
+  ChatSource,
   ChatStreamEvent,
   ChatThread,
   ChatThreadListResponse,
@@ -17,6 +20,7 @@ export type {
   FileDocumentationResponse,
   FileGraphsResponse,
   FileSourceResponse,
+  GraphKind,
   ImportRepoResponse,
   Language,
   PipelineAttempt,
@@ -35,6 +39,7 @@ export type {
   ToolStatus,
   UpdateUserRepoRequest,
 } from './api.models';
+export { isGraphReference } from './api.models';
 export { ChatService } from './chat.service';
 export { DeepAnalysisService } from './deep-analysis.service';
 export { RepoService } from './repo.service';

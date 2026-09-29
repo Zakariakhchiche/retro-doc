@@ -342,10 +342,68 @@
                       }
                     </div>
                   }
-                  <div class="markdown-body" [innerHTML]="msg.content | markdown" [appMermaid]="msg.content | markdown"></div>
+                  <div
+                    class="markdown-body"
+                    [innerHTML]="msg.content | markdown"
+                    [appMermaid]="msg.content | markdown"
+                    [appFileRefs]="msg.content"
+                    [fileIndex]="fileIndex()"
+                    (fileRefClick)="openFileFromPath($event)"
+                  ></div>
                 }
               </div>
             </div>
+            @if (isAssistantRole(msg.role) && msg.sources?.length) {
+              <div class="analysis__chat-sources">
+                <span class="analysis__chat-sources-label">{{ 'analysis.sources' | translate }}</span>
+                <ul class="analysis__chat-sources-list">
+                  @for (source of visibleSources(msg); track sourceKey(source)) {
+                    <li>
+                      <button
+                        type="button"
+                        class="analysis__chat-source"
+                        [class.analysis__chat-source--graph]="isGraphSource(source)"
+                        [attr.aria-label]="sourceAriaLabel(source)"
+                        [title]="source.path"
+                        (click)="openSource(source)"
+                      >
+                        @if (isGraphSource(source)) {
+                          <svg width="13" height="13" viewBox="0 0 16 16" fill="none" aria-hidden="true">
+                            <circle cx="3.5" cy="8" r="2" stroke="currentColor" stroke-width="1.2"/>
+                            <circle cx="12.5" cy="4" r="2" stroke="currentColor" stroke-width="1.2"/>
+                            <circle cx="12.5" cy="12" r="2" stroke="currentColor" stroke-width="1.2"/>
+                            <path d="M5.3 7.1 10.7 4.6M5.3 8.9l5.4 2.5" stroke="currentColor" stroke-width="1.2" stroke-linecap="round"/>
+                          </svg>
+                          <span class="analysis__chat-source-badge">{{ sourceBadge(source) }}</span>
+                        } @else {
+                          <svg width="13" height="13" viewBox="0 0 16 16" fill="none" aria-hidden="true">
+                            <path d="M9 1.5H4.5A1.5 1.5 0 0 0 3 3v10a1.5 1.5 0 0 0 1.5 1.5h7A1.5 1.5 0 0 0 13 13V5.5L9 1.5Z" stroke="currentColor" stroke-width="1.2" stroke-linejoin="round"/>
+                            <path d="M9 1.5V5.5H13" stroke="currentColor" stroke-width="1.2" stroke-linejoin="round"/>
+                          </svg>
+                        }
+                        <span class="analysis__chat-source-name">{{ sourceLabel(source) }}</span>
+                      </button>
+                    </li>
+                  }
+                  @if (hiddenSourceCount(msg) > 0) {
+                    <li>
+                      <button
+                        type="button"
+                        class="analysis__chat-source analysis__chat-source--more"
+                        [attr.aria-expanded]="isSourcesExpanded(msg.key)"
+                        (click)="toggleSources(msg.key)"
+                      >
+                        @if (isSourcesExpanded(msg.key)) {
+                          {{ 'analysis.collapseSources' | translate }}
+                        } @else {
+                          {{ 'analysis.moreSources' | translate: { count: hiddenSourceCount(msg) } }}
+                        }
+                      </button>
+                    </li>
+                  }
+                </ul>
+              </div>
+            }
             @if (isAssistantRole(msg.role)) {
               <div class="analysis__chat-actions">
                 @if (msg.variantCount && msg.variantCount > 1) {
@@ -602,8 +660,18 @@
     <app-graph-explorer
       [repoId]="repoId()!"
       [files]="files()"
+      [target]="graphTarget()"
       (closed)="closeGraph()"
       (chatRequested)="onChatRequested($event)"
+    />
+  }
+
+  @if (activeFile(); as file) {
+    <app-file-source-viewer
+      [repoId]="repoId()!"
+      [fileId]="file.fileId"
+      [mode]="file.mode"
+      (closed)="closeFileViewer()"
     />
   }
 

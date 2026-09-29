@@ -7,11 +7,14 @@ import { Analysis } from './analysis';
 import {
   ChatMessage,
   ChatService,
+  ChatSource,
   ChatStreamEvent,
   ChatThreadMessagesResponse,
   DeepAnalysisService,
+  RepoFile,
   RepoStore,
 } from '../../core/api';
+import { GraphTarget } from './graph-explorer/graph-explorer.model';
 
 /**
  * The parts of `Analysis` these tests drive.
@@ -34,6 +37,17 @@ interface AnalysisInternals {
   retry(msg: ChatMessage): void;
   switchVariant(messageId: string | undefined): void;
   loadOlderMessages(): void;
+  fileIndex(): ReadonlyMap<string, string>;
+  activeFile(): { fileId: string; mode: string } | null;
+  graphTarget(): GraphTarget | null;
+  isGraphOpen(): boolean;
+  openSource(source: ChatSource): void;
+  closeFileViewer(): void;
+  closeGraph(): void;
+  visibleSources(msg: ChatMessage): ChatSource[];
+  hiddenSourceCount(msg: ChatMessage): number;
+  toggleSources(key: string): void;
+  sourceLabel(source: ChatSource): string;
 }
 
 class ChatServiceStub {
@@ -288,5 +302,167 @@ describe('Analysis variant switching', () => {
     // its cursor would page further back through that branch's history.
     expect(component.chatMessages().map((m) => m.id)).toEqual(['m1']);
     expect(component.hasMoreMessages()).toBe(false);
+  });
+});
+
+describe('Analysis answer citations', () => {
+  const FILES: RepoFile[] = [
+    { file_id: 'f1', path: 'src/Foo.java' },
+    // Two `Main.java`: the basename names no single file.
+    { file_id: 'f2', path: 'src/a/Main.java' },
+    { file_id: 'f3', path: 'src/b/Main.java' },
+  ];
+
+  const FILE_REF: ChatSource = { path: 'src/Foo.java', file_id: 'f1' };
+  const GRAPH_REF: ChatSource = {
+    kind: 'graph',
+    path: 'src/Foo.java',
+    file_id: 'f1',
+    graph_type: 'cfg',
+    scope: 'method:com.x.Foo#run():void',
+    node: '7',
+  };
+
+  const toolEnd = (id: string, sources: ChatSource[]): ChatStreamEvent => ({
+    type: 'tool_end',
+    tool: 'repo_read_file',
+    id,
+    status: 'success',
+    sources,
+  });
+
+  let component: AnalysisInternals;
+  let chat: ChatServiceStub;
+
+  beforeEach(() => {
+    chat = new ChatServiceStub();
+
+    TestBed.configureTestingModule({
+      providers: [
+        provideLocationMocks(),
+        provideTranslateService({}),
+        { provide: ChatService, useValue: chat },
+        {
+          provide: RepoStore,
+          useValue: { getRepo: () => of(null), getRepoFiles: () => of(FILES) },
+        },
+        { provide: DeepAnalysisService, useValue: { listAnalyses: () => of([]) } },
+        {
+          provide: ActivatedRoute,
+          useValue: {
+            paramMap: of(convertToParamMap({ id: 'repo-1' })),
+            snapshot: { paramMap: convertToParamMap({ id: 'repo-1' }) },
+          },
+        },
+      ],
+    });
+    TestBed.overrideComponent(Analysis, { set: { template: '' } });
+
+    component = TestBed.createComponent(Analysis).componentInstance as unknown as AnalysisInternals;
+    component.activeChatId.set('chat-1');
+    component.chatMessages.set([
+      { key: 'local-0', id: 'm1', role: 'user', content: 'A question' },
+      answer(),
+    ]);
+  });
+
+  it('attaches the places a tool cited to the answer being written', () => {
+    component.retry(answer());
+    chat.retryStream.next(toolEnd('t1', [FILE_REF]));
+
+    expect(component.chatMessages()[1].sources).toEqual([FILE_REF]);
+  });
+
+  it('keeps the strip on a turn whose last event is not a tool', () => {
+    component.retry(answer());
+    chat.retryStream.next(toolEnd('t1', [FILE_REF]));
+    chat.retryStream.next({ type: 'token', content: 'Here it is.' });
+    chat.retryStream.complete();
+
+    // `finalizeStreamedMessage` returns early with no tool segment to split
+    // on, which is why the strip is attached as the tools report it.
+    expect(component.chatMessages()[1]).toMatchObject({
+      content: 'Here it is.',
+      sources: [FILE_REF],
+    });
+  });
+
+  it('drops a repeated citation but keeps a file and a graph point apart', () => {
+    component.retry(answer());
+    chat.retryStream.next(toolEnd('t1', [FILE_REF, FILE_REF]));
+    chat.retryStream.next(toolEnd('t2', [GRAPH_REF, FILE_REF]));
+
+    expect(component.chatMessages()[1].sources).toEqual([FILE_REF, GRAPH_REF]);
+  });
+
+  it('clears the previous answer’s citations when it is regenerated', () => {
+    component.chatMessages.set([{ ...answer(), sources: [FILE_REF] }]);
+    component.retry(answer());
+
+    expect(component.chatMessages()[0].sources).toBeUndefined();
+  });
+
+  it('carries the citations of a stored answer onto the rendered message', () => {
+    component.switchVariant('m2');
+    chat.variantResponse.next({
+      chat_id: 'chat-1',
+      messages: [
+        { id: 'm2', role: 'ai', content: 'First answer', sources: [{ kind: 'file', ...FILE_REF }] },
+      ],
+    });
+
+    expect(component.chatMessages()[0].sources).toEqual([{ kind: 'file', ...FILE_REF }]);
+  });
+
+  it('indexes the repository so a mention in an answer can be resolved', () => {
+    const index = component.fileIndex();
+
+    expect(index.get('src/Foo.java')).toBe('f1');
+    expect(index.get('Foo.java')).toBe('f1');
+    expect(index.has('Main.java')).toBe(false);
+  });
+
+  it('opens the drawer on a cited file', () => {
+    component.openSource(FILE_REF);
+    expect(component.activeFile()).toEqual({ fileId: 'f1', mode: 'source' });
+
+    component.closeFileViewer();
+    expect(component.activeFile()).toBeNull();
+  });
+
+  it('opens the explorer on the graph point a citation addresses', () => {
+    component.openSource(GRAPH_REF);
+
+    expect(component.isGraphOpen()).toBe(true);
+    expect(component.graphTarget()).toEqual({
+      fileId: 'f1',
+      graphType: 'cfg',
+      scope: 'method:com.x.Foo#run():void',
+      node: '7',
+    });
+
+    // Reopening by hand must not land back on that point.
+    component.closeGraph();
+    expect(component.graphTarget()).toBeNull();
+  });
+
+  it('collapses a long strip until the reader asks for the rest', () => {
+    const msg: ChatMessage = {
+      key: 'k',
+      role: 'ai',
+      content: '',
+      sources: Array.from({ length: 8 }, (_, i) => ({ path: `src/F${i}.java`, file_id: `f${i}` })),
+    };
+
+    expect(component.visibleSources(msg)).toHaveLength(5);
+    expect(component.hiddenSourceCount(msg)).toBe(3);
+
+    component.toggleSources('k');
+    expect(component.visibleSources(msg)).toHaveLength(8);
+  });
+
+  it('names a graph chip after the file and the function it points into', () => {
+    expect(component.sourceLabel(FILE_REF)).toBe('Foo.java');
+    expect(component.sourceLabel(GRAPH_REF)).toBe('Foo.java › Foo#run():void');
   });
 });

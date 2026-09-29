@@ -7,9 +7,13 @@ import {
   ChatThread,
   ChatThreadListResponse,
   ChatThreadMessagesResponse,
+  GraphKind,
   ToolStatus,
 } from './api.models';
 import { UserService } from '../auth';
+
+/** The graph kinds the explorer can render. */
+const GRAPH_KINDS: readonly string[] = ['ast', 'cfg', 'dfg'];
 
 @Injectable({ providedIn: 'root' })
 export class ChatService {
@@ -298,15 +302,39 @@ export class ChatService {
     return typeof value === 'number' ? value : undefined;
   }
 
+  /**
+   * Decode the references a tool produced.
+   *
+   * An entry with no `kind` is left untagged rather than marked as a file:
+   * `kind` was added after the field shipped, and every consumer treats an
+   * absent one as a file already.
+   */
   private sources(value: unknown): ChatSource[] | undefined {
     if (!Array.isArray(value)) return undefined;
     const sources = value
       .map((entry) => this.asRecord(entry))
       .filter((entry) => typeof entry['path'] === 'string')
-      .map((entry) => ({
-        path: entry['path'] as string,
-        file_id: this.str(entry, 'file_id') ?? '',
-      }));
+      .map((entry) => this.toReference(entry));
     return sources.length > 0 ? sources : undefined;
+  }
+
+  private toReference(entry: Record<string, unknown>): ChatSource {
+    const path = entry['path'] as string;
+    const fileId = this.str(entry, 'file_id') ?? '';
+    const graphType = this.str(entry, 'graph_type');
+
+    // A graph reference the explorer cannot render is not one: fall back to
+    // the file, which still opens something useful.
+    if (entry['kind'] === 'graph' && graphType && GRAPH_KINDS.includes(graphType)) {
+      return {
+        kind: 'graph',
+        path,
+        file_id: fileId,
+        graph_type: graphType as GraphKind,
+        scope: this.str(entry, 'scope'),
+        node: this.str(entry, 'node'),
+      };
+    }
+    return { path, file_id: fileId };
   }
 }

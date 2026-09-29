@@ -191,6 +191,57 @@ describe('ChatService streaming', () => {
     ]);
   });
 
+  it('carries a graph reference through with the point it addresses', async () => {
+    const collected = collect();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    await stream.push(
+      'event: tool_end\ndata: {"tool": "repo_read_file_graph", "id": "t2", "status": "success",' +
+        ' "sources": [{"kind": "graph", "path": "a.py", "file_id": "f1", "graph_type": "cfg",' +
+        ' "scope": "method:A#run():void", "node": "7"}]}\n\n'
+    );
+
+    expect(collected.events).toEqual([
+      {
+        type: 'tool_end',
+        tool: 'repo_read_file_graph',
+        id: 't2',
+        status: 'success',
+        sources: [
+          {
+            kind: 'graph',
+            path: 'a.py',
+            file_id: 'f1',
+            graph_type: 'cfg',
+            scope: 'method:A#run():void',
+            node: '7',
+          },
+        ],
+      },
+    ]);
+  });
+
+  it('falls back to a file citation for a graph kind the explorer cannot render', async () => {
+    const collected = collect();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    await stream.push(
+      'event: tool_end\ndata: {"tool": "repo_read_file_graph", "id": "t3", "status": "success",' +
+        ' "sources": [{"kind": "graph", "path": "a.py", "file_id": "f1", "graph_type": "pdg"}]}\n\n'
+    );
+
+    // A chip that opens nothing is worse than one that opens the file.
+    expect(collected.events).toEqual([
+      {
+        type: 'tool_end',
+        tool: 'repo_read_file_graph',
+        id: 't3',
+        status: 'success',
+        sources: [{ path: 'a.py', file_id: 'f1' }],
+      },
+    ]);
+  });
+
   it('surfaces a server error as an error event rather than as text', async () => {
     const collected = collect();
     await new Promise((resolve) => setTimeout(resolve, 0));

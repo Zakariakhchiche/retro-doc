@@ -8,6 +8,38 @@ export interface GraphElements {
   edges: cytoscape.ElementDefinition[];
 }
 
+/** A graph point the explorer should open on, carried in from a chat answer. */
+export interface GraphTarget {
+  fileId: string;
+  graphType: GraphType;
+  /** One CFG/DFG of the file; `null` for an AST, which has a single graph. */
+  scope: string | null;
+  node: string | null;
+}
+
+/**
+ * Find the node a `GraphTarget` addresses, `null` when nothing matches.
+ *
+ * CFG and DFG nodes keep the backend's own ids (`convertScopedGraphToElements`),
+ * so those match outright. AST nodes carry no id of their own — `convertAstToElements`
+ * numbers them client-side — so a target for one names a label instead, and is
+ * matched exactly before falling back to a prefix, which catches a method
+ * written without its return type.
+ */
+export function resolveTargetNodeId(elements: GraphElements, node: string | null): string | null {
+  const wanted = node?.trim();
+  if (!wanted) return null;
+
+  const data = elements.nodes.map((n) => n.data as { id?: string; label?: string });
+
+  return (
+    data.find((n) => n.id === wanted)?.id ??
+    data.find((n) => n.label === wanted)?.id ??
+    data.find((n) => n.label?.startsWith(wanted))?.id ??
+    null
+  );
+}
+
 // Detects graphs produced by a pre-`return_type_fqn`/`branch` backend. Such data
 // predates a breaking pipeline change and can only be upgraded by re-analysing the
 // project, so the UI surfaces a "re-upload as a new project" warning.
