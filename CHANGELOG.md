@@ -7,13 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Chats can display reference material (such as graphs and attached files).
+
 ## [0.2.0] - 2026-09-23
 
 ### Added
 
 - Analyses can target multiple languages per repository (previously a single language).
 - Analyses supports git links in addition to zip.
-- Chat can fork and replay messages.
+- Chats can fork and replay messages.
 - Repository statistics captured during analysis (e.g. number of files and number of files
   per extension) and surfaced to the end user once the analysis completes.
 
